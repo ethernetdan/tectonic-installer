@@ -17,5 +17,19 @@ pipeline {
         sh 'make structure-check'
       }
     }
+
+    stage('Smoke Tests') {
+      steps {
+        parallel (
+          "AWS": {
+
+            sh """touch test
+            git status
+            ls -la
+            """
+          }
+        )
+      }
+    }
   }
 }
