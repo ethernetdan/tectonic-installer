@@ -6,19 +6,16 @@ ROOT="$DIR/../../.."
 
 export VM_MEMORY='2048'
 export ASSETS_DIR="${ASSETS_DIR:-$GOPATH/src/github.com/coreos/matchbox/examples/assets}"
+TEST_KUBECONFIG=${ROOT}/../build/${CLUSTER}/generated/auth/kubeconfig
 MATCHBOX_SHA=9a3347f1b5046c231f089374b63defb800b04079
-INSTALLER_BIN=${INSTALLER_BIN:-"$ROOT/bin/linux/installer"}
 SANITY_BIN=${SANITY_BIN:="$ROOT/bin/sanity"}
-CLUSTER_CREATE="http://127.0.0.1:4444/cluster/create"
 
 main() {
-  if [ -z "$TECTONIC_LICENSE" ] || [ -z "$TECTONIC_PULL_SECRET" ];then
-      echo "Must export both \$TECTONIC_LICENSE and \$TECTONIC_PULL_SECRET"
+  if [ -z "${CLUSTER}" ]; then
+      echo "Must export \$CLUSTER"
       return 1
   fi
-
-  TEMP=$(mktemp -d)
-  echo "Creating $TEMP"
+  setupSSH
 
   echo "Getting matchbox"
   rm -rf matchbox
@@ -27,7 +24,16 @@ main() {
   git checkout $MATCHBOX_SHA
   chmod 600 tests/smoke/fake_rsa
   popd
+
+  echo "Copying matchbook test creds"
   cp examples/fake-creds/{ca.crt,server.crt,server.key} matchbox/examples/etc/matchbox
+
+  echo "Adding test SSH credentials to ssh-agent"
+  ssh-add matchbox/tests/smoke/fake_rsa
+  echo
+
+  echo "SSH agent identities:"
+  ssh-agent -L
 
   setup
   trap cleanup EXIT
@@ -37,18 +43,15 @@ main() {
   sudo -S -E ./scripts/devnet create
   popd
 
-  echo "Starting Tectonic Installer"
-  ${INSTALLER_BIN} -log-level=debug -open-browser=false & INSTALLER_PID=$!
-  sleep 2
+  echo "Waiting for matchbox to be ready.."
+  sleep 10
 
-  echo "Writing configuration"
-  cp ${ROOT}/examples/metal.json ${TEMP}/metal.json
-  sed -i "s/<TECTONIC_LICENSE>/${TECTONIC_LICENSE}/" ${TEMP}/metal.json
-  sed -i "s/<TECTONIC_PULL_SECRET>/$(echo ${TECTONIC_PULL_SECRET} | sed 's/\\/\\\\/g')/" ${TEMP}/metal.json
+  echo "Starting terraform"
+  (cd ${ROOT}/.. && make apply) &
+  TERRAFORM_PID=$!
 
-  echo "Submitting to Tectonic Installer"
-  curl -H "Content-Type: application/json" -X POST -d @${TEMP}/metal.json ${CLUSTER_CREATE} -o $TEMP/assets.zip
-  unzip $TEMP/assets.zip -d $TEMP
+  echo "Waiting for terraform to be ready"
+  sleep 15
 
   echo "Starting QEMU/KVM nodes"
   pushd matchbox
@@ -62,8 +65,6 @@ main() {
     sleep 15
     echo "Waiting for Kubelets to start..."
   done
-
-  ssh core@node1.example.com 'sudo systemctl start bootkube'
 
   until [[ "$(readyNodes)" == "3" ]]; do
     sleep 5
@@ -88,7 +89,7 @@ main() {
   done
   
   export NODE_COUNT=3
-  export TEST_KUBECONFIG="${TEMP}/assets/auth/kubeconfig"
+  export TEST_KUBECONFIG
   echo "Running Go sanity tests"
   ${SANITY_BIN}
 
@@ -113,12 +114,14 @@ kubelet() {
   curl --silent --fail -m 1 http://$1:10255/healthz > /dev/null
 }
 
-ssh() {
-  command ssh -i matchbox/tests/smoke/fake_rsa -o stricthostkeychecking=no "$@"
+# setupSSH configures SSH agent for this shell
+setupSSH() {
+  echo "Configuring ssh-agent"
+  eval `ssh-agent -s`
 }
 
 k8s() {
-  ${ROOT}/bin/kubectl --kubeconfig=${TEMP}/assets/auth/kubeconfig "$@"
+  kubectl --kubeconfig=${TEST_KUBECONFIG} "$@"
 }
 
 # ready nodes returns the number of Ready Kubernetes nodes
