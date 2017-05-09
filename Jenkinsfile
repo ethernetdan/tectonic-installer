@@ -4,13 +4,7 @@
 3. CoreOS does not ship with `make`, so Docker builds still have to use small scripts.
 */
 pipeline {
-  agent {
-    docker {
-      image 'quay.io/coreos/tectonic-builder:v1.7'
-      label 'worker'
-    }
-  }
-
+  agent any
   options {
     timeout(time:35, unit:'MINUTES')
     buildDiscarder(logRotator(numToKeepStr:'20'))
@@ -18,6 +12,12 @@ pipeline {
 
   stages {
     stage('TerraForm: Syntax Check') {
+      agent {
+        docker {
+          image 'quay.io/coreos/tectonic-builder:v1.7'
+          label 'worker'
+        }
+      }
       steps {
         sh """#!/bin/bash -ex
         make structure-check
@@ -26,6 +26,12 @@ pipeline {
     }
 
     stage('Installer: Build & Test') {
+      agent {
+        docker {
+          image 'quay.io/dan_gillespie/tectonic-builder:v1'
+          label 'worker'
+        }
+      }
       environment {
         GO_PROJECT = '/go/src/github.com/coreos/tectonic-installer'
       }
@@ -50,6 +56,12 @@ pipeline {
       steps {
         parallel (
           "TerraForm: AWS": {
+            agent {
+              docker {
+                image 'quay.io/dan_gillespie/tectonic-builder:v1'
+                label 'worker'
+              }
+            }
             withCredentials([file(credentialsId: 'tectonic-pull', variable: 'TF_VAR_tectonic_pull_secret_path'),
                              file(credentialsId: 'tectonic-license', variable: 'TF_VAR_tectonic_license_path'),
                              [
