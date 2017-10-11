@@ -1,15 +1,40 @@
 package podsession
 
 import (
-	"crypto/sha256"
 	"net/http"
+	"net/http/httputil"
 	"time"
+)
+
+const (
+	// ForwardedHostHeader contains the host of the original request.
+	ForwardedHostHeader = "X-Forwarded-Host"
+
+	// KubernetesServiceHeader contains the Kubernetes Service to be used for the request.
+	KubernetesServiceHeader = "X-Kubernetes-Service"
 )
 
 // NewProxy returns a Proxy configured with the given Config.
 func NewProxy(cfg Config) (*Proxy, error) {
+	// setup reverse proxy
+	director := func(req *http.Request) {
+		// record original host
+		req.Header.Set(ForwardedHostHeader, req.Host)
+
+		// direct to Service using scheme from config and service determined in ServeHTTP
+		req.URL.Scheme = cfg.ProxyScheme
+		req.URL.Host = req.Header.Get(KubernetesServiceHeader)
+
+		if _, ok := req.Header["User-Agent"]; !ok {
+			// explicitly disable User-Agent so it's not set to default value
+			req.Header.Set("User-Agent", "")
+		}
+	}
+
 	return &Proxy{
-		config: cfg,
+		config:   cfg,
+		lastSeen: map[string]time.Time{},
+		proxy:    &httputil.ReverseProxy{Director: director},
 	}, nil
 }
 
@@ -18,32 +43,5 @@ func NewProxy(cfg Config) (*Proxy, error) {
 type Proxy struct {
 	config   Config
 	lastSeen map[string]time.Time
-}
-
-// Handler proxies requests to the Pod for the session.
-func (p *Proxy) Handler() http.Handler {
-	return http.HandlerFunc(p.ServeHTTP)
-}
-
-// createProxyService uses the Kubernetes API to create a new service for the given session.
-func (p *Proxy) createProxyService(name string) {
-	//				* Use label indicating managed by the installer
-	//				* Record current time in annotation + local map of session => last seen
-	//				* Ignore already exist failures but retry for all others until timeout below
-	//				* Reattempt connection for 15 seconds, if timeout:
-	//						* Return 502 with cookie
-}
-
-// heartbeatProxyService marks that the proxy Service has just been used.
-func (p *Proxy) heartbeatProxyService(name string) {
-	//		* Patch Pod with heartbeat annotation set to current time
-
-}
-
-// hashServiceName returns the hash used to identify the Service for the session.
-func (p *Proxy) hashServiceName(sessionName string) string {
-	hashData := sha256.Sum256([]byte(sessionName))
-	var serviceName []byte
-	copy(serviceName, hashData[:p.config.NameLength])
-	return string(serviceName)
+	proxy    *httputil.ReverseProxy
 }

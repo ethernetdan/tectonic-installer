@@ -1,59 +1,49 @@
 package podsession
 
 import (
-	"crypto/rand"
-	"encoding/base32"
-	"io"
+	"context"
 	"net/http"
-	"strings"
-	"time"
 )
 
-func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// attempt to retrieve session cookie
-	var session string
-	if c, err := r.Cookie(p.config.SessionCookie); err == nil {
-		// use session token from cookie
-		session = c.Value
-	} else {
-		// generate new session token
-		session = encode32(GenerateRandomKey(32))
-	}
+// Handler proxies requests to the Pod for the session.
+func (p *Proxy) Handler() http.Handler {
+	return http.HandlerFunc(p.proxyHTTP)
+}
 
-	// set session cookie
-	c := &http.Cookie{
+// proxyHTTP is wrapped to allow an http.Handler to be provided.
+func (p *Proxy) proxyHTTP(w http.ResponseWriter, req *http.Request) {
+	session := p.restoreSessionOrNew(req)
+	p.setSession(w, session)
+
+	// hash session to use as name of Service and ensure Service exists
+	serviceName := hashServiceName(session, p.config.NameLength)
+	go p.UpdateService(serviceName)
+
+	// record Kubernetes service name for proxy
+	req.Header.Set(KubernetesServiceHeader, serviceName)
+
+	// timeout request if not successful
+	c, cancel := context.WithTimeout(req.Context(), p.config.ProxyTimeout)
+	req = req.WithContext(c)
+	defer cancel()
+
+	p.proxy.ServeHTTP(w, req)
+}
+
+// restoreSessionOrNew tries to restore the session name from a cookie and generates a new one if that fails.
+func (p *Proxy) restoreSessionOrNew(req *http.Request) string {
+	if c, err := req.Cookie(p.config.SessionCookie); err == nil {
+		return c.Value
+	}
+	sessionData := GenerateRandomKey(32)
+	return encode32(sessionData)
+}
+
+// setSession creates and sets a cookie containing the session name.
+func (p *Proxy) setSession(w http.ResponseWriter, sessionName string) {
+	cookie := &http.Cookie{
 		Name:  p.config.SessionCookie,
-		Value: session,
+		Value: sessionName,
 	}
-	http.SetCookie(w, c)
-
-	// hash session to use as Service Name
-	serviceName := p.hashServiceName(session)
-
-	// check if session exists
-	if seen, exists := p.lastSeen[serviceName]; !exists {
-		go p.createProxyService(serviceName)
-	} else if seen.Add(p.config.Heartbeat).Before(time.Now().UTC()) {
-		go p.heartbeatProxyService(serviceName)
-	}
-
-	//* Proxy connection to Pod
-}
-
-// GenerateRandomKey creates a random key with the given length in bytes.
-// On failure, returns nil. From github.com/gorilla/securecookie.
-//
-// Callers should explicitly check for the possibility of a nil return, treat
-// it as a failure of the system random number generator, and not continue.
-func GenerateRandomKey(length int) []byte {
-	k := make([]byte, length)
-	if _, err := io.ReadFull(rand.Reader, k); err != nil {
-		return nil
-	}
-	return k
-}
-
-// encode32 use base32 to encode into a string.
-func encode32(in []byte) string {
-	return strings.TrimRight(base32.StdEncoding.EncodeToString(in), "=")
+	http.SetCookie(w, cookie)
 }
